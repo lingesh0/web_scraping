@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ----------------- Hugging Face Login -----------------
 try:
-    login(token="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")  # Replace with your own token
+    login(token="")  # Replace with your own token
     logger.info("Logged into Hugging Face Hub.")
 except Exception as e:
     logger.warning(f"Failed to log into Hugging Face: {e}")
