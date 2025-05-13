@@ -20,6 +20,7 @@ import string
 import requests
 from bs4 import BeautifulSoup
 import nltk
+import torch
 nltk.download('punkt', quiet=True)
 nltk.download('wordnet', quiet=True)
 nltk.download('stopwords', quiet=True)
@@ -288,7 +289,7 @@ def preprocess_text(text):
 
 # ----------------- Question Generation -----------------
 def generate_questions(text, num_questions=150):
-    """Generate questions from the extracted text"""
+    """Generate unique questions from the extracted text"""
     logger.info(f"Initializing question generation model...")
     
     try:
@@ -318,7 +319,7 @@ def generate_questions(text, num_questions=150):
             chunks.append(current_chunk.strip())
         
         # Generate questions for each chunk
-        all_questions = []
+        all_questions = set()  # Use a set to ensure uniqueness
         for i, chunk in enumerate(chunks):
             if not chunk:
                 continue
@@ -339,7 +340,7 @@ def generate_questions(text, num_questions=150):
                 for output in outputs:
                     question = output["generated_text"].strip()
                     if question and question not in all_questions:
-                        all_questions.append(question)
+                        all_questions.add(question)
                         
                 # If we've generated enough questions, stop
                 if len(all_questions) >= num_questions:
@@ -349,8 +350,8 @@ def generate_questions(text, num_questions=150):
                 logger.error(f"Error generating questions for chunk {i+1}: {e}")
                 continue
         
-        logger.info(f"Generated {len(all_questions)} questions")
-        return all_questions
+        logger.info(f"Generated {len(all_questions)} unique questions")
+        return list(all_questions)[:num_questions]  # Return only the required number of questions
         
     except Exception as e:
         logger.error(f"Failed to initialize question generation model: {e}")
@@ -358,15 +359,25 @@ def generate_questions(text, num_questions=150):
 
 # ----------------- Answer Generation -----------------
 def generate_answers(questions, text):
-    """Generate answers for the given questions using the extracted text"""
+    """Generate elaborate answers for the given questions using the extracted text"""
     logger.info(f"Initializing answer generation model...")
     
     try:
         # Create the answer generation pipeline
         answer_generator = pipeline(
             "question-answering", 
-            model="deepset/roberta-base-squad2"
+            model="deepset/roberta-base-squad2",  # Use a lightweight QA model
+            tokenizer="deepset/roberta-base-squad2",
+            device=0 if torch.cuda.is_available() else -1  # Use GPU if available
         )
+        
+        # Split the context into smaller chunks
+        max_chunk_size = 512  # Maximum tokens for the model
+        context_chunks = []
+        words = text.split()
+        for i in range(0, len(words), max_chunk_size):
+            chunk = " ".join(words[i:i + max_chunk_size])
+            context_chunks.append(chunk)
         
         # Generate answers for each question
         answers = []
@@ -374,21 +385,26 @@ def generate_answers(questions, text):
             logger.info(f"Generating answer for question {i+1}/{len(questions)}")
             
             try:
-                result = answer_generator(
-                    question=question,
-                    context=text,
-                    max_answer_len=200
-                )
+                # Iterate over context chunks to find the best answer
+                best_answer = None
+                for chunk in context_chunks:
+                    result = answer_generator(
+                        question=question,
+                        context=chunk,
+                        max_answer_len=200
+                    )
+                    answer = result.get("answer", "").strip()
+                    if answer and (not best_answer or len(answer) > len(best_answer)):
+                        best_answer = answer
                 
-                answer = result.get("answer", "").strip()
-                if not answer:
-                    answer = "No answer found in the text."
-                    
-                answers.append(answer)
+                if not best_answer:
+                    best_answer = "No answer found in the text."
+                
+                answers.append(best_answer)
                 
             except Exception as e:
                 logger.error(f"Error generating answer for question {i+1}: {e}")
-                answers.append("Error generating answer for this question.")
+                answers.append(f"Error generating answer for the question: '{question}'.")
                 
             # Add a small delay to avoid overwhelming the model
             time.sleep(0.2)
@@ -398,7 +414,7 @@ def generate_answers(questions, text):
         
     except Exception as e:
         logger.error(f"Failed to initialize answer generation model: {e}")
-        return ["Error generating answers"] * len(questions)
+        return [f"Error generating answer for the question: '{q}'." for q in questions]
 
 # ----------------- Save Results -----------------
 def save_results(url, questions, answers, output_file=None):
@@ -505,3 +521,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+
+
+
+    
