@@ -24,6 +24,9 @@ nltk.download('punkt', quiet=True)
 nltk.download('wordnet', quiet=True)
 nltk.download('stopwords', quiet=True)
 nltk.download('omw-1.4', quiet=True)
+nltk.download('punkt_tab', quiet=True)
+
+
 
 # ----------------- Logging Setup -----------------
 logging.basicConfig(
@@ -185,23 +188,24 @@ def fallback_scraper(url):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         response.raise_for_status()
-        
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Remove potential ad elements
-        for ad_class in AD_CLASSES:
-            for element in soup.find_all(class_=lambda c: c and ad_class in c.lower()):
-                if element:
-                    element.decompose()
-                
-        for ad_id in AD_IDS:
-            for element in soup.find_all(id=lambda i: i and ad_id in i.lower()):
-                if element:
-                    element.decompose()
-        
+
+        # Log the raw HTML for debugging
+        logger.debug(f"Raw HTML content: {soup.prettify()[:1000]}")  # Log first 1000 characters
+
+        # Comment out ad filtering for debugging
+        # for ad_class in AD_CLASSES:
+        #     for element in soup.find_all(class_=lambda c: c and ad_class in c.lower()):
+        #         element.decompose()
+
+        # for ad_id in AD_IDS:
+        #     for element in soup.find_all(id=lambda i: i and ad_id in i.lower()):
+        #         element.decompose()
+
         # Get title
         title = soup.title.string if soup.title else ""
-        
+
         # Try to find main content
         main_content = None
         for tag in ['main', 'article', 'div']:
@@ -215,88 +219,54 @@ def fallback_scraper(url):
                     break
             if main_content:
                 break
-        
+
         # If no main content identified, use the whole body
         if not main_content:
             main_content = soup.body
-        
+
         # Extract paragraphs from main content
         paragraphs = []
         if main_content:
             for p in main_content.find_all('p'):
                 text = p.get_text().strip()
                 if text and len(text) > 15:
-                    # Check if text matches any ad pattern
-                    is_ad = False
-                    for pattern in AD_PATTERNS:
-                        if re.search(pattern, text, re.IGNORECASE):
-                            is_ad = True
-                            break
-                    if not is_ad:
-                        paragraphs.append(text)
-        
+                    paragraphs.append(text)
+
+        # Log extracted paragraphs for debugging
+        logger.info(f"Extracted paragraphs: {paragraphs[:5]}")  # Log first 5 paragraphs
+
         content = ' '.join(paragraphs)
-        
+
         return [{
             'url': url,
-            'title': title.strip(),
-            'content': content  # Include content in the return value
-        }]  
-        
+            'title': title.strip() if title else "No Title",
+            'content': content if content else "No content extracted"
+        }]
+
     except Exception as e:
         logger.error(f"Fallback scraper error: {e}")
-        return []
+        return [{
+            'url': url,
+            'title': "Error",
+            'content': f"Failed to extract content: {str(e)}"
+        }]
 
-# ----------------- Scrape Website using Scrapy -----------------
+# ----------------- Scrape Website -----------------
 def scrape_website(url, max_pages=10):
-    # Configure Scrapy settings
-    settings = {
-        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'LOG_LEVEL': 'ERROR',  # Reduce logging
-        'ROBOTSTXT_OBEY': True,
-        'CONCURRENT_REQUESTS': 1,  # Be gentle
-        'DOWNLOAD_TIMEOUT': 30,    # Timeout in seconds
-        'RETRY_TIMES': 2,          # Number of retries
-        'COOKIES_ENABLED': True,   # Enable cookies
-        'HTTPCACHE_ENABLED': True, # Enable caching
-        'RECURSION_LIMIT': 5000,
-        'REDIRECT_ENABLED': False
-    }
-    
     try:
-        # Initialize the spider and process
-        spider = ContentExtractorSpider
-        process = CrawlerProcess(settings)
-        
-        # Setup signal to capture the items
-        collected_data = []
-        
-        # Run the spider
-        process.crawl(spider, url=url, max_pages=max_pages)
-        process.start()  # This blocks until the crawl is finished
-        
-        # Get crawler from process
-        crawler = list(process.crawlers)[0]
-        # Get spider from crawler
-        spider_instance = crawler.spider
-        
-        # Get collected data from the spider
-        collected_data = spider_instance.collected_data
-        
-        # If no data collected, try fallback
-        if not collected_data:
-            logger.info("No data collected with Scrapy, using fallback scraper")
-            collected_data = fallback_scraper(url)
-            
-        return collected_data
-        
+        logger.info(f"Using direct requests to scrape {url}")
+        return fallback_scraper(url)
     except Exception as e:
-        logger.error(f"Error in Scrapy crawling: {e}")
-        logger.info(f"Falling back to requests + BeautifulSoup for {url}")
+        logger.error(f"Direct requests failed: {e}")
+        logger.info("Retrying with Scrapy...")
         try:
-            return fallback_scraper(url)
-        except Exception as fallback_error:
-            logger.error(f"Fallback scraping also failed: {fallback_error}")
+            process = CrawlerProcess(get_project_settings())
+            spider = ContentExtractorSpider(url=url, max_pages=max_pages)
+            process.crawl(spider)
+            process.start()
+            return spider.collected_data
+        except Exception as scrapy_error:
+            logger.error(f"Scrapy also failed: {scrapy_error}")
             return []
 
 # ----------------- Text Preprocessing -----------------
@@ -337,7 +307,7 @@ def generate_questions(text, num_questions=150):
         current_chunk = ""
         
         for sentence in sentences:
-            if len(current_chunk) + len(sentence) < 500:  # Keep chunks under 500 chars
+            if len(current_chunk) + len(sentence) < 1000:  # Increase chunk size to 1000 characters
                 current_chunk += " " + sentence
             else:
                 if current_chunk:
@@ -357,10 +327,13 @@ def generate_questions(text, num_questions=150):
             
             try:
                 qg_input = "generate questions: " + chunk
+                
+                # Use beam search to generate multiple sequences
                 outputs = question_generator(
-                    qg_input, 
-                    max_length=64, 
-                    num_return_sequences=min(5, num_questions - len(all_questions))
+                    qg_input,
+                    max_length=64,
+                    num_return_sequences=10,  # Generate up to 10 questions per chunk
+                    num_beams=10  # Use beam search for better diversity
                 )
                 
                 for output in outputs:
@@ -488,13 +461,14 @@ def main():
         # Step 2: Combine all content
         all_content = ""
         for item in scraped_data:
-            if 'content' in item:
+            if 'content' in item and item['content'] and item['content'] != "No content extracted":
                 all_content += item['content'] + " "
             else:
-                logger.warning(f"Missing content in item from {item.get('url', 'unknown URL')}")
+                logger.warning(f"Missing or empty content in item from {item.get('url', 'unknown URL')}")
         
         if not all_content.strip():
-            logger.error("No content found in scraped data")
+            logger.error("No content found in scraped data. Please check the URL or the website structure.")
+            print("Error: No content found. Try a different URL or inspect the website's structure.")
             return
             
         # Step 3: Preprocess the text
